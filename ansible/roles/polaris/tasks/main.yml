@@ -1,0 +1,472 @@
+---
+# ==============================================================================
+# 1. JAVA 21
+# ==============================================================================
+- name: "polaris : Instalar Java 21"
+  apt:
+    name: "{{ polaris_java_package }}"
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: "polaris : Verificar versão do Java"
+  command: "{{ polaris_java_home }}/bin/java -version"
+  register: java_version
+  changed_when: false
+
+# ==============================================================================
+# 2. USUÁRIO E DIRETÓRIOS
+# ==============================================================================
+- name: "polaris : Criar grupo do serviço"
+  group:
+    name: "{{ polaris_group }}"
+    state: present
+  become: yes
+
+- name: "polaris : Criar usuário do serviço"
+  user:
+    name: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+    shell: /sbin/nologin
+    create_home: no
+    state: present
+  become: yes
+
+- name: "polaris : Criar diretórios base"
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+    mode: '0755'
+  loop:
+    - "{{ polaris_install_dir }}"
+    - "{{ polaris_data_dir }}"
+    - "{{ polaris_log_dir }}"
+    - "{{ polaris_conf_dir }}"
+  become: yes
+
+# ==============================================================================
+# 3. BANCO DE DADOS POSTGRESQL
+# ==============================================================================
+- name: "polaris : Criar usuário PostgreSQL para Polaris"
+  postgresql_user:
+    name: "{{ polaris_db_user }}"
+    password: "{{ polaris_db_pass }}"
+    state: present
+  become: yes
+  become_user: postgres
+
+- name: "polaris : Criar banco com owner correto"
+  postgresql_db:
+    name: "{{ polaris_db_name }}"
+    owner: "{{ polaris_db_user }}"
+    state: present
+  become: yes
+  become_user: postgres
+
+- name: "polaris : Configurar schema polaris_schema"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    query: |
+      CREATE SCHEMA IF NOT EXISTS polaris_schema;
+      ALTER SCHEMA polaris_schema OWNER TO {{ polaris_db_user }};
+      GRANT ALL ON SCHEMA polaris_schema TO {{ polaris_db_user }};
+  become: yes
+  become_user: postgres
+  notify: restart polaris
+
+# ==============================================================================
+# 4. DOWNLOAD E INSTALAÇÃO
+# ==============================================================================
+- name: "polaris : Limpar/Criar diretório temporário"
+  file:
+    path: "/tmp/polaris_extract"
+    state: "{{ item }}"
+  loop: [absent, directory]
+  become: yes
+
+- name: "polaris : Descompactar binário"
+  unarchive:
+    src: "{{ polaris_archive }}"
+    dest: "/tmp/polaris_extract"
+  become: yes
+
+- name: "polaris : Identificar diretório raiz extraído"
+  find:
+    paths: "/tmp/polaris_extract"
+    file_type: directory
+  register: extracted_root
+  become: yes
+
+- name: "polaris : Copiar conteúdo extraído"
+  copy:
+    src: "{{ extracted_root.files[0].path }}/"
+    dest: "{{ polaris_install_dir }}/"
+    remote_src: yes
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+  become: yes
+
+- name: "polaris : Criar link simbólico"
+  file:
+    src: "{{ polaris_install_dir }}/server/quarkus-run.jar"
+    dest: "{{ polaris_install_dir }}/polaris-runner.jar"
+    state: link
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+  become: yes
+
+# ==============================================================================
+# 5. CONFIGURAÇÃO E SERVIÇO
+# ==============================================================================
+- name: "polaris : Aplicar application.properties"
+  template:
+    src: application.properties.j2
+    dest: "{{ polaris_conf_dir }}/application.properties"
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+    mode: '0640'
+  become: yes
+  notify: restart polaris
+
+- name: "polaris : Instalar unit systemd"
+  template:
+    src: polaris.service.j2
+    dest: /etc/systemd/system/polaris.service
+  become: yes
+  notify: reload systemd
+
+# ==============================================================================
+# 6. BOOTSTRAP INICIAL (Apenas uma vez)
+# ==============================================================================
+- name: "polaris : Executar bootstrap se necessário"
+  shell: |
+    {{ polaris_java_home }}/bin/java \
+    -Dquarkus.config.locations={{ polaris_conf_dir }}/application.properties \
+    -jar {{ polaris_install_dir }}/admin/quarkus-run.jar bootstrap -r {{ polaris_realm }} -c {{ polaris_realm }},{{ polaris_root_client_id }},{{ polaris_root_client_secret }}
+  become: yes
+  environment:
+    JAVA_HOME: "{{ polaris_java_home }}"
+  args:
+    creates: "{{ polaris_conf_dir }}/bootstrap-credentials.env"
+  register: bootstrap_run
+
+- name: "polaris : Criar marcador de bootstrap"
+  copy:
+    dest: "{{ polaris_conf_dir }}/bootstrap-credentials.env"
+    content: "BOOTSTRAP_COMPLETE=true"
+  when: bootstrap_run.changed
+
+# ==============================================================================
+# 7. INICIAR SERVIÇO E OBTER TOKEN
+# ==============================================================================
+- name: "polaris : Iniciar/Reiniciar serviço"
+  systemd:
+    name: polaris
+    state: restarted
+    enabled: yes
+    daemon_reload: yes
+  become: yes
+
+- name: "polaris : Aguardar Polaris ficar disponível"
+  wait_for:
+    port: "{{ polaris_port }}"
+    delay: 5
+    timeout: 60
+
+- name: "polaris : Obter token de acesso (root)"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/catalog/v1/oauth/tokens"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      grant_type: "client_credentials"
+      client_id: "{{ polaris_root_client_id }}"
+      client_secret: "{{ polaris_root_client_secret }}"
+      scope: "PRINCIPAL_ROLE:ALL"
+  register: polaris_token
+  until: polaris_token.status == 200
+  retries: 10
+  delay: 5
+
+# ==============================================================================
+# 8. CRIAÇÃO DO CATÁLOGO (Idempotente)
+# ==============================================================================
+- name: "polaris : Verificar se catálogo 'iceberg' já existe"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/catalogs/iceberg"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+    status_code: [200, 404]
+  register: catalog_get_result
+
+- name: "polaris : Criar catálogo 'iceberg' (se não existir)"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/catalogs"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      catalog:
+        name: "iceberg"
+        type: "INTERNAL"
+        properties:
+          "default-base-location": "s3://{{ polaris_default_warehouse_bucket }}/iceberg"
+        storageConfigInfo:
+          storageType: "S3"
+          allowedLocations: ["s3://{{ polaris_default_warehouse_bucket }}/"]
+          stsUnavailable: true
+          endpoint: "{{ polaris_s3_endpoint }}"
+          region: "{{ polaris_s3_region }}"
+          pathStyleAccess: true
+    status_code: [200, 201, 409, 500]
+  register: catalog_create_result
+  failed_when: >
+    catalog_create_result.status == 500 and 
+    'duplicate key' not in (catalog_create_result | string) and
+    'already exists' not in (catalog_create_result | string)
+  when: catalog_get_result.status == 404
+
+- name: "polaris : Atualizar catálogo 'iceberg' (se já existir)"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/catalogs/iceberg"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      currentEntityVersion: "{{ catalog_get_result.json.entityVersion | int }}"
+      properties:
+        "default-base-location": "s3://{{ polaris_default_warehouse_bucket }}/iceberg"
+      storageConfigInfo:
+        storageType: "S3"
+        allowedLocations: ["s3://{{ polaris_default_warehouse_bucket }}/"]
+        stsUnavailable: true
+        endpoint: "{{ polaris_s3_endpoint }}"
+        region: "{{ polaris_s3_region }}"
+        pathStyleAccess: true
+    status_code: [200, 204]
+  when: catalog_get_result.status == 200
+
+# ==============================================================================
+# 9. RBAC SIMPLIFICADO (Apenas Service Account para Trino)
+# ==============================================================================
+
+# --- Catalog Role (permissões no catálogo) ---
+- name: "polaris : Criar Catalog Role 'service_catalog_role'"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/catalogs/iceberg/catalog-roles"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      catalogRole:
+        name: "service_catalog_role"
+    status_code: [200, 201, 409, 500]
+  register: create_catalog_role_result
+  failed_when: >
+    create_catalog_role_result.status == 500 and 
+    'duplicate key' not in (create_catalog_role_result | string) and
+    'already exists' not in (create_catalog_role_result | string)
+
+- name: "polaris : Conceder CATALOG_MANAGE_CONTENT ao 'service_catalog_role'"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/catalogs/iceberg/catalog-roles/service_catalog_role/grants"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      grant:
+        type: "catalog"
+        privilege: "CATALOG_MANAGE_CONTENT"
+    status_code: [200, 201, 204, 409, 500]
+  register: grant_result
+  failed_when: >
+    grant_result.status == 500 and 
+    'duplicate key' not in (grant_result | string) and
+    'already exists' not in (grant_result | string)
+
+# --- Principal Role (permissões no nível do serviço) ---
+- name: "polaris : Criar Principal Role 'service_principal_role'"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principal-roles"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      principalRole:
+        name: "service_principal_role"
+    status_code: [200, 201, 409, 500]
+  register: create_principal_role_result
+  failed_when: >
+    create_principal_role_result.status == 500 and 
+    'duplicate key' not in (create_principal_role_result | string) and
+    'already exists' not in (create_principal_role_result | string)
+
+# --- Vincular Catalog Role ao Principal Role ---
+- name: "polaris : Ligar Catalog Role ao Principal Role"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principal-roles/service_principal_role/catalog-roles/iceberg"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      catalogRole:
+        name: "service_catalog_role"
+    status_code: [200, 201, 204, 409, 500]
+  register: assign_catalog_role
+  failed_when: >
+    assign_catalog_role.status == 500 and 
+    'duplicate key' not in (assign_catalog_role | string) and
+    'already exists' not in (assign_catalog_role | string)
+
+# ==============================================================================
+# 10. SERVICE ACCOUNT PARA TRINO (Captura Credenciais Reais)
+# ==============================================================================
+- name: "polaris : Verificar se service account 'trino_service' já existe"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principals/trino_service"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+    status_code: [200, 404]
+  register: trino_service_check
+
+- name: "polaris : Deletar service account existente (para garantir credenciais novas)"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principals/trino_service"
+    method: DELETE
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+    status_code: [200, 204, 404]
+  when: trino_service_check.status == 200
+
+- name: "polaris : Aguardar deleção ser processada"
+  pause:
+    seconds: 2
+  when: trino_service_check.status == 200
+
+- name: "polaris : Criar service account 'trino_service' (captura credenciais)"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principals"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      principal:
+        name: "{{ polaris_trino_service_name }}"
+    status_code: [200, 201]
+  register: trino_service_create
+
+- name: "polaris : Extrair credenciais do service account"
+  set_fact:
+    trino_service_client_id: "{{ trino_service_create.json.credentials.clientId }}"
+    trino_service_client_secret: "{{ trino_service_create.json.credentials.clientSecret }}"
+
+- name: "polaris : Validar que credenciais foram capturadas"
+  assert:
+    that:
+      - trino_service_client_id is defined
+      - trino_service_client_secret is defined
+      - trino_service_client_id | length > 0
+      - trino_service_client_secret | length > 0
+    fail_msg: "Falha ao capturar credenciais do service account."
+    success_msg: "Credenciais capturadas: clientId={{ trino_service_client_id }}"
+
+- name: "polaris : Vincular 'service_principal_role' ao trino_service"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principals/{{ polaris_trino_service_name }}/principal-roles"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      principalRole:
+        name: "service_principal_role"
+    status_code: [200, 201, 204]
+
+- name: "polaris : Criar diretório para credenciais"
+  file:
+    path: /etc/polaris/service-accounts
+    state: directory
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+    mode: '0700'
+  become: yes
+
+- name: "polaris : Salvar credenciais do service account"
+  copy:
+    content: |
+      {
+        "clientId": "{{ trino_service_client_id }}",
+        "clientSecret": "{{ trino_service_client_secret }}",
+        "principalName": "{{ polaris_trino_service_name }}",
+        "createdAt": "{{ ansible_date_time.iso8601 }}"
+      }
+    dest: /etc/polaris/service-accounts/trino_service.json
+    owner: "{{ polaris_user }}"
+    group: "{{ polaris_group }}"
+    mode: '0600'
+  become: yes
+
+- name: "polaris : Fazer fetch das credenciais para o control node"
+  fetch:
+    src: /etc/polaris/service-accounts/trino_service.json
+    dest: "{{ playbook_dir }}/credentials/trino_service.json"
+    flat: yes
+  become: yes
+
+# ==============================================================================
+# 11. MANTER ROOT COM ACESSO ADMIN (Para administração manual)
+# ==============================================================================
+- name: "polaris : Criar Principal Role 'admin_principal_role'"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principal-roles"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      principalRole:
+        name: "admin_principal_role"
+    status_code: [200, 201, 409, 500]
+  register: create_admin_role
+  failed_when: >
+    create_admin_role.status == 500 and 
+    'duplicate key' not in (create_admin_role | string) and
+    'already exists' not in (create_admin_role | string)
+
+- name: "polaris : Ligar admin_principal_role ao root"
+  uri:
+    url: "http://127.0.0.1:{{ polaris_port }}/api/management/v1/principals/root/principal-roles"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ polaris_token.json.access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body:
+      principalRole:
+        name: "admin_principal_role"
+    status_code: [200, 201, 204, 409, 500]
+  register: assign_admin_role
+  failed_when: >
+    assign_admin_role.status == 500 and 
+    'duplicate key' not in (assign_admin_role | string) and
+    'already exists' not in (assign_admin_role | string)
