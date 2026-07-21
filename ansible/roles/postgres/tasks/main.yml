@@ -64,7 +64,7 @@
 # ==============================================================================
 - name: "Postgres : Configurar acesso para o Polaris no pg_hba.conf"
   lineinfile:
-    path: /etc/postgresql/14/main/pg_hba.conf
+    path: /etc/postgresql/12/main/pg_hba.conf
     line: "host    {{ polaris_db_name | default('polaris_db') }}    {{ polaris_db_user | default('polaris_user') }}    192.168.56.0/24    md5"
     insertafter: EOF
   become: yes
@@ -72,7 +72,7 @@
 
 - name: "Postgres : Escutar em todas as interfaces"
   lineinfile:
-    path: /etc/postgresql/14/main/postgresql.conf
+    path: /etc/postgresql/12/main/postgresql.conf
     regexp: "^#?listen_addresses ="
     line: "listen_addresses = '*'"
   become: yes
