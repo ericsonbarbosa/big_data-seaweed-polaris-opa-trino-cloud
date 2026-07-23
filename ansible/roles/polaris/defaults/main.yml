@@ -25,28 +25,61 @@ polaris_realm: "POLARIS"
 
 # ==============================================================================
 # CREDENCIAIS ROOT (Apenas para administração inicial)
+# ⚠️ Em produção, sobrescrever via Ansible Vault
 # ==============================================================================
 polaris_root_client_id: "root"
 polaris_root_client_secret: "root_secret_changeme"
 
 # ==============================================================================
 # SERVICE ACCOUNT PARA TRINO (Autenticação do motor SQL)
+# ⚠️ Em produção, sobrescrever via Ansible Vault
 # ==============================================================================
 polaris_trino_service_name: "trino_service"
 polaris_trino_service_client_id: "trino_client"
 polaris_trino_service_client_secret: "trino_secret_changeme"
 
 # ==============================================================================
-# POSTGRES
+# POSTGRESQL - CREDENCIAIS DO BANCO (Runtime do Polaris)
 # ==============================================================================
+# Estas variáveis são usadas pelo Polaris em tempo de execução para conectar
+# ao banco de dados. Devem bater exatamente com o que foi provisionado no
+# role 'postgres' (ou no banco remoto existente).
 polaris_db_kind: postgresql
 polaris_db_host: localhost
 polaris_db_port: 5432
 polaris_db_name: polaris_db
 polaris_db_user: polaris_user
-polaris_db_pass: polaris_pass_secret
+polaris_db_pass: polaris_pass_secret  # ⚠️ Usar Ansible Vault em produção!
 
+# JDBC URL completa (conveniência para templates)
 polaris_db_url: "jdbc:postgresql://{{ polaris_db_host }}:{{ polaris_db_port }}/{{ polaris_db_name }}"
+
+# ==============================================================================
+# POSTGRESQL - CREDENCIAIS DE ADMIN (Apenas para Provisionamento)
+# ==============================================================================
+# Estas variáveis são usadas APENAS durante a execução do playbook para criar
+# o usuário e o banco do Polaris. Não são usadas em runtime.
+#
+# CENÁRIO 1: PostgreSQL LOCAL (mesma EC2) - Padrão
+#   polaris_db_use_become: true
+#   polaris_db_become_user: postgres
+#   (autenticação via peer, sem senha)
+#
+# CENÁRIO 2: PostgreSQL REMOTO (RDS, outra EC2, etc.)
+#   polaris_db_use_become: false
+#   polaris_db_admin_user: admin_user
+#   polaris_db_admin_pass: senha_segura  (via Ansible Vault!)
+#   (autenticação via senha)
+polaris_db_admin_user: postgres
+# polaris_db_admin_pass: ""  # Descomente e defina via Vault para PostgreSQL remoto
+
+# ==============================================================================
+# POSTGRESQL - MODO DE AUTENTICAÇÃO PARA PROVISIONAMENTO
+# ==============================================================================
+# true  = usa 'become_user' (autenticação peer, ideal para PostgreSQL local)
+# false = usa 'login_user/login_password' (ideal para PostgreSQL remoto)
+polaris_db_use_become: true
+polaris_db_become_user: postgres
 
 # ==============================================================================
 # S3 (SeaweedFS)

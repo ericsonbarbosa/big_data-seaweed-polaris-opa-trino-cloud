@@ -338,25 +338,21 @@ ansible-playbook -i ansible/inventory/hosts.ini ansible/playbook.yml --tags "sea
 ./setup.sh --tags seaweed
 ```
 
-### Utilizando SSH e Vagarent para acessar as VMs
+### Como executar o script update-opa-bundle.sh na máquina remota
 
 ```bash
-# Acesso via SSH com o Vagrant
-vagrant ssh 192.169.56.101
-# ou (nome da VM no virtual box)
-vagrant ssh seaweedfs-node
+# 1. Copiar o script para o servidor
+scp -o StrictHostKeyChecking=no ./update-opa-bundle.sh fnadmin@143.244.201.207:~/
 
-# Acesso via SSH com iteração da com a chave SSH privada.
-ssh -i .\.vagrant\machines\seaweedfs-node\virtualbox\private_key vagrant@192.168.56.101
+# 2. Conectar via SSH (pela VPN)
+ ssh fnadmin@143.244.201.207 -o StrictHostKeyChecking=no
 
-# Vagrant destroy - Limpar IP antigo da tabela SSH Windows
-ssh-keygen -R 192.168.56.101
+# 3. Dar permissão de execução
+chmod +x ~/update-opa-bundle.sh
 
-```
+# 4. Executar
+~/update-opa-bundle.sh https://github.com/ericsonbarbosa/opa-policies.git main
 
-### Como executar o script update-opa-bundle.sh
-
-```bash
 # Necessário instalar o AWS CLI na máquina que está rodando o script
 sudo apt-get install -y awscli
 

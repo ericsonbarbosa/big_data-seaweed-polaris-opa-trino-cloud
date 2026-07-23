@@ -1,0 +1,29 @@
+---
+# ==============================================================================
+# VARIÁVEIS PADRÃO DO ROLE POSTGRESQL
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# CREDENCIAIS DO BANCO (usadas pelo Polaris via JDBC)
+# ------------------------------------------------------------------------------
+polaris_db_name: "polaris_db"
+polaris_db_user: "polaris_user"
+polaris_db_pass: "polaris_pass_secret"  # ⚠️ Usar Ansible Vault em produção!
+
+# ------------------------------------------------------------------------------
+# CONEXÃO DE REDE
+# ------------------------------------------------------------------------------
+# Host do banco (localhost pois Polaris e Postgres estão na mesma EC2)
+polaris_db_host: "localhost"
+
+# Porta padrão do PostgreSQL
+polaris_db_port: "5432"
+
+# CIDR permitido no pg_hba.conf
+# 127.0.0.1/32 = apenas loopback (mesma EC2)
+polaris_allowed_network: "127.0.0.1/32"
+
+# ------------------------------------------------------------------------------
+# CAMINHOS DO POSTGRESQL (sobrescrito dinamicamente após instalação)
+# ------------------------------------------------------------------------------
+postgresql_conf_dir: "/etc/postgresql/12/main"

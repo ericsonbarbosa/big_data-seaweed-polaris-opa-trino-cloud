@@ -32,16 +32,42 @@ opa_tls_cert: ""
 opa_tls_key: ""
 
 # ==============================================================================
-# BUNDLES (futuro: políticas remotas)
-# ==============================================================================
-opa_enable_bundles: false
-opa_bundle_service_url: ""
-
-# ==============================================================================
 # BUNDLES (políticas distribuídas via SeaweedFS Filer)
 # ==============================================================================
+# true  = OPA baixa políticas do SeaweedFS (produção)
+# false = OPA usa políticas locais em {{ opa_policies_dir }} (dev/testes)
 opa_enable_bundles: true
-opa_bundle_service_url: "http://192.168.56.101:8888"
+
+# URL do SeaweedFS Filer (OPA e SeaweedFS no mesmo servidor → localhost)
+# Se separados em hosts diferentes, usar IP privado VPC (ex: http://10.10.0.6:8888)
+opa_bundle_service_url: "http://127.0.0.1:8888"
+
+# Caminho do bundle no Filer
 opa_bundle_resource: "/buckets/opa-policies/bundle.tar.gz"
+
+# Intervalo de polling (segundos) para verificar atualizações do bundle
 opa_bundle_polling_min: 10
 opa_bundle_polling_max: 30
+
+# Tamanho máximo do bundle (bytes) — 10 MB
+opa_bundle_size_limit: 10485760
+
+# Timeout para resposta do serviço (segundos)
+opa_bundle_response_timeout: 5
+
+# ==============================================================================
+# LABELS (identificação do OPA no cluster)
+# ==============================================================================
+opa_environment: "production"
+opa_region: "br-south"
+opa_role: "opa-server"
+
+# ==============================================================================
+# VALIDAÇÃO (controle de comportamento do playbook)
+# ==============================================================================
+# true  = playbook FALHA se o bundle não carregar (produção)
+# false = playbook continua com WARNING se o bundle não carregar (dev)
+opa_strict_mode: false
+
+# Tempo de espera inicial para o OPA carregar o bundle (segundos)
+opa_bundle_wait_seconds: 10

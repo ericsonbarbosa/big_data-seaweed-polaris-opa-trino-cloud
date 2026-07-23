@@ -1,23 +1,35 @@
 #!/bin/bash
 
 # ==============================================================================
-# Script de Atualização de Bundle OPA via GitHub
+# Script de Atualização de Bundle OPA via GitHub + SeaweedFS S3
 # Uso: ./update-opa-bundle.sh <github-repo-url> [branch]
-# Exemplo: ./update-opa-bundle.sh https://github.com/usuario/opa-policies.git main
+#
+# Exemplos:
+#   ./update-opa-bundle.sh https://github.com/usuario/opa-policies.git
+#   ./update-opa-bundle.sh https://github.com/usuario/opa-policies.git main
+#   ./update-opa-bundle.sh https://github.com/usuario/opa-policies.git develop
+#
+# Fluxo:
+#   GitHub → Clone → Validação → Bundle → Upload S3 → OPA (download via Filer)
 # ==============================================================================
 
-set -e  # Sair em caso de erro
+set -e
 
 # ==============================================================================
-# CONFIGURAÇÕES (ajuste conforme seu ambiente)
+# CONFIGURAÇÕES (ajuste via variáveis de ambiente se necessário)
 # ==============================================================================
-FILER_URL="http://192.168.56.101:8888"
-FILER_BUCKET="opa-policies"
-S3_BUCKET="opa-policies"
-S3_KEY="bundle.tar.gz"
-S3_ENDPOINT="http://192.168.56.101:8333"
 
-# Diretório temporário para trabalho
+# SeaweedFS S3 Gateway (para upload do bundle)
+S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:8333}"
+S3_BUCKET="${S3_BUCKET:-opa-policies}"
+S3_KEY="${S3_KEY:-bundle.tar.gz}"
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-admin}"
+S3_SECRET_KEY="${S3_SECRET_KEY:-admin_secret}"
+
+# SeaweedFS Filer (para verificação pós-upload)
+FILER_URL="${FILER_URL:-http://127.0.0.1:8888}"
+
+# Diretório temporário de trabalho
 WORK_DIR="/tmp/opa-bundle-update"
 BUNDLE_NAME="bundle.tar.gz"
 
@@ -26,33 +38,20 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 # ==============================================================================
 # FUNÇÕES AUXILIARES
 # ==============================================================================
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1" >&2
-}
+log_info()    { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $1" >&2; }
 
 cleanup() {
     log_info "Limpando diretório temporário..."
     rm -rf "$WORK_DIR"
 }
-
-# Capturar Ctrl+C e limpar
 trap cleanup EXIT
 
 # ==============================================================================
@@ -69,16 +68,40 @@ if [ $# -lt 1 ]; then
 fi
 
 REPO_URL="$1"
-BRANCH="${2:-main}"  # Padrão: main se não especificado
+BRANCH="${2:-main}"
 
 log_info "Repositório: $REPO_URL"
-log_info "Branch: $BRANCH"
+log_info "Branch:      $BRANCH"
+log_info "S3 Endpoint: $S3_ENDPOINT"
+log_info "S3 Bucket:   $S3_BUCKET"
+
+# ==============================================================================
+# PASSO 0: VALIDAR CONECTIVIDADE COM SEAWEEDFS S3
+# ==============================================================================
+log_info "Passo 0/6: Validando conectividade com SeaweedFS S3..."
+
+S3_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "${S3_ENDPOINT}/" 2>/dev/null || echo "000")
+
+if [ "$S3_STATUS" == "000" ]; then
+    log_error "SeaweedFS S3 Gateway não está acessível em ${S3_ENDPOINT}"
+    log_info "Verifique se o serviço está rodando:"
+    echo "   sudo systemctl status seaweedfs-s3"
+    exit 1
+fi
+
+log_success "SeaweedFS S3 Gateway acessível (HTTP ${S3_STATUS})"
 
 # ==============================================================================
 # PASSO 1: CLONAR REPOSITÓRIO
 # ==============================================================================
-log_info "Passo 1/5: Clonando repositório..."
+log_info "Passo 1/6: Clonando repositório..."
 
+if ! command -v git &> /dev/null; then
+    log_error "git não encontrado. Instale com: sudo apt-get install git"
+    exit 1
+fi
+
+# Limpar diretório de trabalho (garantir estado limpo)
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 
@@ -87,12 +110,13 @@ if ! git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$WORK_DIR/repo"; then
     exit 1
 fi
 
-log_success "Repositório clonado com sucesso"
+COMMIT_HASH=$(git -C "$WORK_DIR/repo" rev-parse --short HEAD)
+log_success "Repositório clonado (commit: $COMMIT_HASH)"
 
 # ==============================================================================
 # PASSO 2: VALIDAR ESTRUTURA DO REPOSITÓRIO
 # ==============================================================================
-log_info "Passo 2/5: Validando estrutura do repositório..."
+log_info "Passo 2/6: Validando estrutura do repositório..."
 
 if [ ! -d "$WORK_DIR/repo/policies" ]; then
     log_error "Estrutura inválida: pasta 'policies/' não encontrada no repositório"
@@ -103,21 +127,35 @@ if [ ! -d "$WORK_DIR/repo/policies" ]; then
     exit 1
 fi
 
-if [ -z "$(find "$WORK_DIR/repo/policies" -name '*.rego' -print -quit)" ]; then
+REGO_COUNT=$(find "$WORK_DIR/repo/policies" -name '*.rego' | wc -l)
+if [ "$REGO_COUNT" -eq 0 ]; then
     log_error "Nenhum arquivo .rego encontrado em policies/"
     exit 1
 fi
 
-log_success "Estrutura validada"
+log_success "Estrutura validada ($REGO_COUNT arquivo(s) .rego)"
 
 # ==============================================================================
-# PASSO 3: GERAR .manifest
+# PASSO 3: VALIDAR SINTAXE REGO
 # ==============================================================================
-log_info "Passo 3/5: Gerando .manifest..."
+log_info "Passo 3/6: Validando sintaxe Rego..."
+
+if command -v opa &> /dev/null; then
+    if ! opa check "$WORK_DIR/repo/policies/"; then
+        log_error "Erro de sintaxe nos arquivos Rego"
+        exit 1
+    fi
+    log_success "Sintaxe Rego válida"
+else
+    log_warn "OPA não encontrado localmente, pulando validação de sintaxe"
+fi
+
+# ==============================================================================
+# PASSO 4: GERAR MANIFEST
+# ==============================================================================
+log_info "Passo 4/6: Gerando .manifest..."
 
 VERSION="v1-$(date +%Y%m%d-%H%M%S)"
-REPO_NAME=$(basename "$REPO_URL" .git)
-COMMIT_HASH=$(git -C "$WORK_DIR/repo" rev-parse --short HEAD)
 
 cat > "$WORK_DIR/repo/.manifest" << EOF
 {
@@ -135,13 +173,10 @@ EOF
 
 log_success "Manifest gerado: $VERSION-$COMMIT_HASH"
 
-log_info "Conteúdo do .manifest:"
-cat "$WORK_DIR/repo/.manifest" | python3 -m json.tool 2>/dev/null || cat "$WORK_DIR/repo/.manifest"
-
 # ==============================================================================
-# PASSO 4: COMPACTAR BUNDLE
+# PASSO 5: COMPACTAR BUNDLE
 # ==============================================================================
-log_info "Passo 4/5: Compactando bundle..."
+log_info "Passo 5/6: Compactando bundle..."
 
 cd "$WORK_DIR/repo"
 
@@ -150,52 +185,63 @@ if ! tar -czf "../$BUNDLE_NAME" .manifest policies/; then
     exit 1
 fi
 
-log_info "Estrutura do bundle:"
-tar -tzf "../$BUNDLE_NAME"
-
-if command -v opa &> /dev/null; then
-    log_info "Validando sintaxe Rego..."
-    if ! opa check policies/; then
-        log_error "Erro de sintaxe nos arquivos Rego"
-        exit 1
-    fi
-    log_success "Sintaxe Rego válida"
-else
-    log_warn "OPA não encontrado localmente, pulando validação de sintaxe"
-fi
-
 BUNDLE_SIZE=$(ls -lh "../$BUNDLE_NAME" | awk '{print $5}')
 log_success "Bundle compactado: $BUNDLE_SIZE"
 
+log_info "Conteúdo do bundle:"
+tar -tzf "../$BUNDLE_NAME"
+
 # ==============================================================================
-# PASSO 5: UPLOAD PARA SEAWEEDFS (VIA S3 API)
+# PASSO 6: UPLOAD PARA SEAWEEDFS VIA S3 API
 # ==============================================================================
-log_info "Passo 5/5: Enviando bundle para SeaweedFS via S3 API..."
+log_info "Passo 6/6: Enviando bundle para SeaweedFS via S3 API..."
 
-if ! command -v aws &> /dev/null; then
-    log_error "AWS CLI não encontrado. Instale com: sudo apt-get install awscli"
+# --- 6a. Criar bucket (idempotente) ---
+log_info "Criando bucket '${S3_BUCKET}' (se não existir)..."
+BUCKET_STATUS=$(curl -s -X PUT "${S3_ENDPOINT}/${S3_BUCKET}" \
+    -H "Authorization: AWS ${S3_ACCESS_KEY}:${S3_SECRET_KEY}" \
+    -o /dev/null -w "%{http_code}")
+
+if [ "$BUCKET_STATUS" -ge 200 ] && [ "$BUCKET_STATUS" -lt 500 ]; then
+    log_success "Bucket '${S3_BUCKET}' criado/verificado (HTTP $BUCKET_STATUS)"
+else
+    log_error "Falha ao criar bucket (HTTP $BUCKET_STATUS)"
     exit 1
 fi
 
-if ! aws sts get-caller-identity --endpoint-url "$S3_ENDPOINT" > /dev/null 2>&1; then
-    log_warn "Credenciais não validadas via STS (não suportado pelo SeaweedFS)."
-    log_info "Assumindo credenciais configuradas via 'aws configure'."
-fi
+# --- 6b. Upload do bundle via S3 API ---
+log_info "Upload do bundle via S3 API..."
+UPLOAD_STATUS=$(curl -s -X PUT "${S3_ENDPOINT}/${S3_BUCKET}/${S3_KEY}" \
+    -H "Authorization: AWS ${S3_ACCESS_KEY}:${S3_SECRET_KEY}" \
+    -H "Content-Type: application/gzip" \
+    --data-binary @"../$BUNDLE_NAME" \
+    -o /dev/null -w "%{http_code}")
 
-log_info "Enviando bundle via S3 API..."
-if ! aws --endpoint-url "$S3_ENDPOINT" s3 cp "../$BUNDLE_NAME" "s3://$S3_BUCKET/$S3_KEY" --no-progress; then
-    log_error "Falha ao enviar bundle"
-    log_info "💡 Dica: verifique se executou 'aws configure' com as credenciais do SeaweedFS"
+if [ "$UPLOAD_STATUS" -ge 200 ] && [ "$UPLOAD_STATUS" -lt 300 ]; then
+    log_success "Upload via S3 API: HTTP $UPLOAD_STATUS"
+else
+    log_error "Falha no upload via S3 API (HTTP $UPLOAD_STATUS)"
+    log_info "Verifique:"
+    echo "   1. Se as credenciais S3 estão corretas (S3_ACCESS_KEY / S3_SECRET_KEY)"
+    echo "   2. Se o bucket '${S3_BUCKET}' existe"
+    echo "   3. Se o SeaweedFS S3 Gateway está rodando: sudo systemctl status seaweedfs-s3"
     exit 1
 fi
 
-log_info "Verificando arquivo no S3..."
-if ! aws --endpoint-url "$S3_ENDPOINT" s3 ls "s3://$S3_BUCKET/$S3_KEY"; then
-    log_error "Bundle não encontrado após upload"
-    exit 1
-fi
+# --- 6c. Verificar se o bundle está acessível via Filer ---
+log_info "Verificando bundle via Filer (${FILER_URL})..."
+sleep 2  # Aguardar propagação
 
-log_success "Bundle enviado para: s3://$S3_BUCKET/$S3_KEY"
+VERIFY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${FILER_URL}/buckets/${S3_BUCKET}/${S3_KEY}")
+
+if [ "$VERIFY_STATUS" == "200" ]; then
+    log_success "Bundle verificado no Filer (HTTP 200)"
+else
+    log_warn "Bundle não encontrado via Filer (HTTP $VERIFY_STATUS)"
+    log_info "O upload S3 foi bem-sucedido, mas a verificação via Filer falhou."
+    log_info "Isso pode indicar um atraso na propagação. O OPA tentará baixar no próximo polling."
+fi
 
 # ==============================================================================
 # RESUMO FINAL
@@ -205,16 +251,21 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN} BUNDLE ATUALIZADO COM SUCESSO!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
-echo "📦 Bundle: $BUNDLE_NAME"
-echo "🔖 Versão: $VERSION-$COMMIT_HASH"
-echo "📍 Localização: s3://$S3_BUCKET/$S3_KEY"
-echo "📏 Tamanho: $BUNDLE_SIZE"
+echo "📦 Bundle:    $BUNDLE_NAME"
+echo "🔖 Versão:    $VERSION-$COMMIT_HASH"
+echo "📍 S3:        s3://${S3_BUCKET}/${S3_KEY}"
+echo "📍 Filer:     ${FILER_URL}/buckets/${S3_BUCKET}/${S3_KEY}"
+echo "📏 Tamanho:   $BUNDLE_SIZE"
+echo "📄 Rego:      $REGO_COUNT arquivo(s)"
 echo ""
-echo "🔄 O OPA detectará a mudança automaticamente em 10-30 segundos"
+echo "📊 Verificar status do OPA:"
+echo "   curl -s http://127.0.0.1:8282/v1/status | jq '.result.bundles.trino'"
 echo ""
-echo "📊 Para verificar se o OPA carregou o novo bundle:"
-echo "   vagrant ssh seaweedfs-node -c 'sudo journalctl -u opa -n 30 --no-pager | grep -i bundle'"
+echo "📋 Listar políticas carregadas:"
+echo "   curl -s http://127.0.0.1:8282/v1/policies | jq '.result[].id'"
 echo ""
-echo "🧪 Para testar no Insomnia:"
-echo "   GET http://192.168.56.101:8282/v1/policies"
+echo "🧪 Testar decisão:"
+echo "   curl -s -X POST http://127.0.0.1:8282/v1/data/trino/allow \\"
+echo "     -H 'Content-Type: application/json' \\"
+echo "     -d '{\"input\":{\"context\":{\"identity\":{\"user\":\"admin\"}},\"action\":{\"operation\":\"SelectFromColumns\"}}}' | jq .result"
 echo ""

@@ -33,17 +33,20 @@ Este role instala e configura o OPA em modo servidor para centralizar governanç
 
 ```bash
 # Health check
-curl http://127.0.0.1:8181/health
+curl http://127.0.0.1:8282/health
+
+# Avaliar status do OPA
+curl -s http://127.0.0.1:8282/v1/status | jq '.result.bundles.trino'
 
 # Listar políticas carregadas
-curl http://127.0.0.1:8181/v1/policies
+curl -s http://127.0.0.1:8282/v1/policies | jq '.result[].id'
 
-# Avaliar política de exemplo
-curl -X POST http://127.0.0.1:8181/v1/data/http.authz \
-  -H "Content-Type: application/json" \
-  -d '{"input": {"method": "GET", "path": ["v1", "data", "example"]}}'
+# Testar decisão tomada após subir política de teste github
+ curl -s -X POST http://127.0.0.1:8282/v1/data/trino/allow \
+     -H 'Content-Type: application/json' \
+     -d '{"input":{"context":{"identity":{"user":"admin"}},"action":{"operation":"SelectFromColumns"}}}' | jq .result
 
 # Query Rego ad-hoc
-curl -X POST http://127.0.0.1:8181/v1/query \
+curl -X POST http://127.0.0.1:8282/v1/query \
   -H "Content-Type: application/json" \
   -d '{"query": "data.example.greeting = message"}'

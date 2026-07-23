@@ -47,34 +47,322 @@
   become: yes
 
 # ==============================================================================
-# 3. BANCO DE DADOS POSTGRESQL
+# 3. BANCO DE DADOS POSTGRESQL (Idempotente com Validação)
 # ==============================================================================
-- name: "polaris : Criar usuário PostgreSQL para Polaris"
+# IMPORTANTE: Cada modo usa um nome de register diferente para evitar
+# que tasks skipped sobrescrevam o resultado das tasks executadas.
+
+# ------------------------------------------------------------------------------
+# 3.1 - Validar conectividade com o PostgreSQL
+# ------------------------------------------------------------------------------
+- name: "polaris : Validar conexão com o PostgreSQL (modo local)"
+  postgresql_query:
+    db: postgres
+    query: "SELECT version();"
+  register: pg_check_local
+  become: yes
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+  failed_when: false
+
+- name: "polaris : Validar conexão com o PostgreSQL (modo remoto)"
+  postgresql_query:
+    db: postgres
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: "SELECT version();"
+  register: pg_check_remote
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+  failed_when: false
+
+# Consolida o resultado em uma única variável
+- name: "polaris : Consolidar resultado da validação"
+  set_fact:
+    pg_version_check: "{{ pg_check_local if (polaris_db_use_become | bool) else pg_check_remote }}"
+
+- name: "polaris : Exibir versão do PostgreSQL detectada"
+  debug:
+    msg: "✅ PostgreSQL acessível - {{ pg_version_check.query_result[0].version }}"
+  when:
+    - pg_version_check is not skipped
+    - pg_version_check.query_result is defined
+
+- name: "polaris : Falhar se PostgreSQL não estiver acessível"
+  fail:
+    msg: |
+      ❌ Não foi possível conectar ao PostgreSQL.
+      Modo: {{ 'local (become)' if (polaris_db_use_become | bool) else 'remoto (TCP)' }}
+      Host: {{ polaris_db_host }}:{{ polaris_db_port }}
+      Erro: {{ pg_version_check.msg | default('desconhecido') }}
+  when: >
+    (pg_version_check is skipped) or
+    (pg_version_check.query_result is not defined) or
+    (pg_version_check is failed)
+
+# ------------------------------------------------------------------------------
+# 3.2 - Verificar se o USUÁRIO já existe
+# ------------------------------------------------------------------------------
+- name: "polaris : Verificar se usuário '{{ polaris_db_user }}' já existe (modo local)"
+  postgresql_query:
+    db: postgres
+    query: "SELECT 1 FROM pg_roles WHERE rolname = '{{ polaris_db_user }}';"
+  register: user_check_local
+  become: yes
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+  changed_when: false
+
+- name: "polaris : Verificar se usuário '{{ polaris_db_user }}' já existe (modo remoto)"
+  postgresql_query:
+    db: postgres
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: "SELECT 1 FROM pg_roles WHERE rolname = '{{ polaris_db_user }}';"
+  register: user_check_remote
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+  changed_when: false
+
+- name: "polaris : Consolidar resultado da verificação de usuário"
+  set_fact:
+    user_check: "{{ user_check_local if (polaris_db_use_become | bool) else user_check_remote }}"
+
+- name: "polaris : Exibir status do usuário"
+  debug:
+    msg: >-
+      {{ '⏭️  SKIP: Usuário ''' ~ polaris_db_user ~ ''' já existe.'
+         if (user_check.query_result | length > 0)
+         else '➕ CREATE: Usuário ''' ~ polaris_db_user ~ ''' será criado.' }}
+
+# ------------------------------------------------------------------------------
+# 3.3 - Criar USUÁRIO apenas se não existir
+# ------------------------------------------------------------------------------
+- name: "polaris : Criar usuário PostgreSQL para Polaris (modo local)"
   postgresql_user:
     name: "{{ polaris_db_user }}"
     password: "{{ polaris_db_pass }}"
     state: present
   become: yes
-  become_user: postgres
+  become_user: "{{ polaris_db_become_user }}"
+  no_log: true
+  when:
+    - polaris_db_use_become | bool
+    - user_check.query_result | length == 0
+  register: user_created_local
 
-- name: "polaris : Criar banco com owner correto"
+- name: "polaris : Criar usuário PostgreSQL para Polaris (modo remoto)"
+  postgresql_user:
+    name: "{{ polaris_db_user }}"
+    password: "{{ polaris_db_pass }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    state: present
+  no_log: true
+  when:
+    - not (polaris_db_use_become | bool)
+    - user_check.query_result | length == 0
+  register: user_created_remote
+
+- name: "polaris : Consolidar resultado da criação de usuário"
+  set_fact:
+    user_created: "{{ user_created_local if (polaris_db_use_become | bool) else user_created_remote }}"
+
+- name: "polaris : Confirmar criação do usuário"
+  debug:
+    msg: "✅ Usuário '{{ polaris_db_user }}' criado com sucesso."
+  when:
+    - user_created is not skipped
+    - user_created is changed
+
+# ------------------------------------------------------------------------------
+# 3.4 - Verificar se o BANCO já existe
+# ------------------------------------------------------------------------------
+- name: "polaris : Verificar se banco '{{ polaris_db_name }}' já existe (modo local)"
+  postgresql_query:
+    db: postgres
+    query: "SELECT 1 FROM pg_database WHERE datname = '{{ polaris_db_name }}';"
+  register: db_check_local
+  become: yes
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+  changed_when: false
+
+- name: "polaris : Verificar se banco '{{ polaris_db_name }}' já existe (modo remoto)"
+  postgresql_query:
+    db: postgres
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: "SELECT 1 FROM pg_database WHERE datname = '{{ polaris_db_name }}';"
+  register: db_check_remote
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+  changed_when: false
+
+- name: "polaris : Consolidar resultado da verificação de banco"
+  set_fact:
+    db_check: "{{ db_check_local if (polaris_db_use_become | bool) else db_check_remote }}"
+
+- name: "polaris : Exibir status do banco"
+  debug:
+    msg: >-
+      {{ '⏭️  SKIP: Banco ''' ~ polaris_db_name ~ ''' já existe.'
+         if (db_check.query_result | length > 0)
+         else '➕ CREATE: Banco ''' ~ polaris_db_name ~ ''' será criado.' }}
+
+# ------------------------------------------------------------------------------
+# 3.5 - Criar BANCO apenas se não existir
+# ------------------------------------------------------------------------------
+- name: "polaris : Criar banco de dados para o Polaris (modo local)"
   postgresql_db:
     name: "{{ polaris_db_name }}"
     owner: "{{ polaris_db_user }}"
     state: present
   become: yes
-  become_user: postgres
+  become_user: "{{ polaris_db_become_user }}"
+  when:
+    - polaris_db_use_become | bool
+    - db_check.query_result | length == 0
+  register: db_created_local
 
-- name: "polaris : Configurar schema polaris_schema"
+- name: "polaris : Criar banco de dados para o Polaris (modo remoto)"
+  postgresql_db:
+    name: "{{ polaris_db_name }}"
+    owner: "{{ polaris_db_user }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    state: present
+  no_log: true
+  when:
+    - not (polaris_db_use_become | bool)
+    - db_check.query_result | length == 0
+  register: db_created_remote
+
+- name: "polaris : Consolidar resultado da criação de banco"
+  set_fact:
+    db_created: "{{ db_created_local if (polaris_db_use_become | bool) else db_created_remote }}"
+
+- name: "polaris : Confirmar criação do banco"
+  debug:
+    msg: "✅ Banco '{{ polaris_db_name }}' criado com sucesso (owner: {{ polaris_db_user }})."
+  when:
+    - db_created is not skipped
+    - db_created is changed
+
+# ------------------------------------------------------------------------------
+# 3.6 - Garantir owner e privilégios completos (NECESSÁRIO PARA BOOTSTRAP)
+# ------------------------------------------------------------------------------
+
+# Garante que o owner do banco é polaris_user (crítico para bootstrap)
+- name: "polaris : Alterar owner do banco para '{{ polaris_db_user }}' (modo local)"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    query: "ALTER DATABASE {{ polaris_db_name }} OWNER TO {{ polaris_db_user }};"
+  become: yes
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+
+- name: "polaris : Alterar owner do banco para '{{ polaris_db_user }}' (modo remoto)"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: "ALTER DATABASE {{ polaris_db_name }} OWNER TO {{ polaris_db_user }};"
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+
+# Concede CREATE no database (necessário para criar schemas durante bootstrap)
+- name: "polaris : Conceder CREATE no database (modo local)"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    query: "GRANT CREATE ON DATABASE {{ polaris_db_name }} TO {{ polaris_db_user }};"
+  become: yes
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+
+- name: "polaris : Conceder CREATE no database (modo remoto)"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: "GRANT CREATE ON DATABASE {{ polaris_db_name }} TO {{ polaris_db_user }};"
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+
+# Privilégios completos no schema public
+- name: "polaris : Garantir privilégios completos no schema public (modo local)"
   postgresql_query:
     db: "{{ polaris_db_name }}"
     query: |
-      CREATE SCHEMA IF NOT EXISTS polaris_schema;
-      ALTER SCHEMA polaris_schema OWNER TO {{ polaris_db_user }};
-      GRANT ALL ON SCHEMA polaris_schema TO {{ polaris_db_user }};
+      GRANT ALL PRIVILEGES ON SCHEMA public TO {{ polaris_db_user }};
+      GRANT CREATE ON SCHEMA public TO {{ polaris_db_user }};
+      GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {{ polaris_db_user }};
+      GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {{ polaris_db_user }};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+        GRANT ALL ON TABLES TO {{ polaris_db_user }};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+        GRANT ALL ON SEQUENCES TO {{ polaris_db_user }};
   become: yes
-  become_user: postgres
-  notify: restart polaris
+  become_user: "{{ polaris_db_become_user }}"
+  when: polaris_db_use_become | bool
+
+- name: "polaris : Garantir privilégios completos no schema public (modo remoto)"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_admin_user }}"
+    login_password: "{{ polaris_db_admin_pass }}"
+    query: |
+      GRANT ALL PRIVILEGES ON SCHEMA public TO {{ polaris_db_user }};
+      GRANT CREATE ON SCHEMA public TO {{ polaris_db_user }};
+      GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {{ polaris_db_user }};
+      GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {{ polaris_db_user }};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+        GRANT ALL ON TABLES TO {{ polaris_db_user }};
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public 
+        GRANT ALL ON SEQUENCES TO {{ polaris_db_user }};
+  no_log: true
+  when: not (polaris_db_use_become | bool)
+
+- name: "polaris : Confirmar aplicação de privilégios"
+  debug:
+    msg: "✅ Owner alterado e privilégios garantidos para '{{ polaris_db_user }}' no banco '{{ polaris_db_name }}'."
+
+# ------------------------------------------------------------------------------
+# 3.7 - Validação final: testar conexão com as credenciais do Polaris
+# ------------------------------------------------------------------------------
+- name: "polaris : Validar conexão com as credenciais do Polaris"
+  postgresql_query:
+    db: "{{ polaris_db_name }}"
+    login_host: "{{ polaris_db_host }}"
+    login_port: "{{ polaris_db_port }}"
+    login_user: "{{ polaris_db_user }}"
+    login_password: "{{ polaris_db_pass }}"
+    query: "SELECT current_user, current_database();"
+  register: final_connection_test
+  no_log: true
+
+- name: "polaris : Exibir resultado da validação final"
+  debug:
+    msg: >-
+      ✅ Conexão validada! 
+      Usuário: {{ final_connection_test.query_result[0].current_user }}, 
+      Banco: {{ final_connection_test.query_result[0].current_database }}
 
 # ==============================================================================
 # 4. DOWNLOAD E INSTALAÇÃO

@@ -2,28 +2,31 @@
 # Open Policy Agent — Configuração do Servidor
 # Gerado automaticamente pelo Ansible — NÃO EDITE MANUALMENTE
 # ==============================================================================
+# Variáveis definidas em: roles/opa/defaults/main.yml
+# Documentação: https://www.openpolicyagent.org/docs/latest/configuration/
+# ==============================================================================
 
+{% if opa_enable_bundles %}
 # ------------------------------------------------------------------------------
 # Serviços (backends de onde o OPA baixa bundles)
 # ------------------------------------------------------------------------------
 services:
   seaweedfs_filer:
-    url: http://192.168.56.101:8888
-    response_header_timeout_seconds: 5
+    url: {{ opa_bundle_service_url }}
+    response_header_timeout_seconds: {{ opa_bundle_response_timeout }}
 
 # ------------------------------------------------------------------------------
 # Bundles (políticas distribuídas via SeaweedFS Filer)
 # ------------------------------------------------------------------------------
-{% if opa_enable_bundles %}
 bundles:
   trino:
     service: seaweedfs_filer
-    resource: /buckets/opa-policies/bundle.tar.gz
+    resource: {{ opa_bundle_resource }}
     polling:
       min_delay_seconds: {{ opa_bundle_polling_min }}
       max_delay_seconds: {{ opa_bundle_polling_max }}
     persist: true
-    size_limit_bytes: 10485760
+    size_limit_bytes: {{ opa_bundle_size_limit }}
 {% endif %}
 
 # ------------------------------------------------------------------------------
@@ -31,6 +34,9 @@ bundles:
 # ------------------------------------------------------------------------------
 decision_logs:
   console: true
+{% if opa_log_format == "json" %}
+  format: json
+{% endif %}
 
 # ------------------------------------------------------------------------------
 # Status Plugin (habilita /v1/status)
@@ -39,9 +45,11 @@ status:
   console: true
 
 # ------------------------------------------------------------------------------
-# Labels (identificação do OPA)
+# Labels (identificação do OPA no cluster)
 # ------------------------------------------------------------------------------
 labels:
-  environment: "{{ ansible_env.HOSTNAME | default('unknown') }}"
-  role: opa-server
-  region: br-south
+  environment: "{{ opa_environment }}"
+  role: {{ opa_role }}
+  region: {{ opa_region }}
+  hostname: "{{ ansible_hostname | default('unknown') }}"
+  opa_version: "{{ opa_version }}"
