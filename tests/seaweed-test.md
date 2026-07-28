@@ -20,4 +20,7 @@ Retorno esperado:
 ```bash
 # Listar os namespaces dentro do buckets com "ls"
 aws --profile seaweedfs --endpoint-url http://127.0.0.1:8333 s3 ls
+
+# Listar todos os arquivos no bucket warehouse
+aws --profile seaweedfs --endpoint-url http://127.0.0.1:8333 s3 ls s3://warehouse/ --recursive
 ```

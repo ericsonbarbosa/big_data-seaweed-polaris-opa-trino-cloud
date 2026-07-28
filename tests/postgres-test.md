@@ -2,7 +2,23 @@
 ## Teste 1 - Listar todas as tabelas do Metastore (incluindo as de sistema)
 
 ```bash
-sudo -u postgres psql -d metastore -c "\dt"
+# Listar schemas disponíveis
+sudo -u postgres psql -d polaris_db -c "\dn"
+
+# Listar todas as entidades (catálogos, namespaces, tabelas, principals)
+sudo -u postgres psql -d polaris_db -c "SELECT id, name, type_code, parent_id FROM polaris_schema.entities ORDER BY type_code, name;"
+
+# Ver apenas catálogos (type_code = 4)
+sudo -u postgres psql -d polaris_db -c "SELECT id, name FROM polaris_schema.entities WHERE type_code = 4;"
+
+# Ver apenas namespaces (type_code = 6)
+sudo -u postgres psql -d polaris_db -c "SELECT id, name, parent_id FROM polaris_schema.entities WHERE type_code = 6;"
+
+# Ver apenas tabelas Iceberg (type_code = 7)
+sudo -u postgres psql -d polaris_db -c "SELECT id, name, parent_id, location_without_scheme FROM polaris_schema.entities WHERE type_code = 7;"
+
+
+
 ```
 
 Você verá algo como:
@@ -26,7 +42,7 @@ Você verá algo como:
 ## Teste 2 - Consultar a versão do Metastore
 
 ```bash
-sudo -u postgres psql -d metastore -c "SELECT * FROM \"VERSION\";"
+sudo -u postgres psql -d polaris_db -c "SELECT * FROM \"VERSION\";"
 ```
 
 Saída típica:

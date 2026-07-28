@@ -84,7 +84,7 @@ polaris_db_become_user: postgres
 # ==============================================================================
 # S3 (SeaweedFS)
 # ==============================================================================
-polaris_s3_endpoint: "http://192.168.56.101:8333"
+polaris_s3_endpoint: "http://127.0.0.1:8333"
 polaris_s3_access_key: admin
 polaris_s3_secret_key: admin_secret
 polaris_s3_region: us-east-1

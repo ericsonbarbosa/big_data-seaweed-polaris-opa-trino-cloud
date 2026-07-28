@@ -49,4 +49,4 @@ curl -s http://127.0.0.1:8282/v1/policies | jq '.result[].id'
 # Query Rego ad-hoc
 curl -X POST http://127.0.0.1:8282/v1/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "data.example.greeting = message"}'
+  -d '{"query": "x = 1 + 1"}'
