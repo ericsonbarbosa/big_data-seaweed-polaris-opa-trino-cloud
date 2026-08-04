@@ -22,7 +22,7 @@ set -e
 # SeaweedFS S3 Gateway (para upload do bundle)
 S3_ENDPOINT="${S3_ENDPOINT:-http://127.0.0.1:8333}"
 S3_BUCKET="${S3_BUCKET:-opa-policies}"
-S3_KEY="${S3_KEY:-bundle.tar.gz}"
+S3_KEY="${S3_KEY:-portal-bundle.tar.gz}"
 S3_ACCESS_KEY="${S3_ACCESS_KEY:-admin}"
 S3_SECRET_KEY="${S3_SECRET_KEY:-admin_secret}"
 
@@ -31,7 +31,7 @@ FILER_URL="${FILER_URL:-http://127.0.0.1:8888}"
 
 # Diretório temporário de trabalho
 WORK_DIR="/tmp/opa-bundle-update"
-BUNDLE_NAME="bundle.tar.gz"
+BUNDLE_NAME="portal-bundle.tar.gz"
 
 # Cores para output
 RED='\033[0;31m'
@@ -160,7 +160,7 @@ VERSION="v1-$(date +%Y%m%d-%H%M%S)"
 cat > "$WORK_DIR/repo/.manifest" << EOF
 {
   "revision": "$VERSION-$COMMIT_HASH",
-  "roots": ["trino"],
+  "roots": ["portal"],
   "metadata": {
     "repository": "$REPO_URL",
     "branch": "$BRANCH",
@@ -192,55 +192,84 @@ log_info "Conteúdo do bundle:"
 tar -tzf "../$BUNDLE_NAME"
 
 # ==============================================================================
-# PASSO 6: UPLOAD PARA SEAWEEDFS VIA S3 API
+# PASSO 6: UPLOAD PARA SEAWEEDFS VIA AWS CLI
 # ==============================================================================
-log_info "Passo 6/6: Enviando bundle para SeaweedFS via S3 API..."
+log_info "Passo 6/6: Enviando bundle para SeaweedFS..."
 
-# --- 6a. Criar bucket (idempotente) ---
-log_info "Criando bucket '${S3_BUCKET}' (se não existir)..."
-BUCKET_STATUS=$(curl -s -X PUT "${S3_ENDPOINT}/${S3_BUCKET}" \
-    -H "Authorization: AWS ${S3_ACCESS_KEY}:${S3_SECRET_KEY}" \
-    -o /dev/null -w "%{http_code}")
-
-if [ "$BUCKET_STATUS" -ge 200 ] && [ "$BUCKET_STATUS" -lt 500 ]; then
-    log_success "Bucket '${S3_BUCKET}' criado/verificado (HTTP $BUCKET_STATUS)"
-else
-    log_error "Falha ao criar bucket (HTTP $BUCKET_STATUS)"
+if ! command -v aws >/dev/null 2>&1; then
+    log_error "aws-cli não encontrado."
+    log_info "Instale com:"
+    echo "   sudo apt install awscli"
     exit 1
 fi
 
-# --- 6b. Upload do bundle via S3 API ---
-log_info "Upload do bundle via S3 API..."
-UPLOAD_STATUS=$(curl -s -X PUT "${S3_ENDPOINT}/${S3_BUCKET}/${S3_KEY}" \
-    -H "Authorization: AWS ${S3_ACCESS_KEY}:${S3_SECRET_KEY}" \
-    -H "Content-Type: application/gzip" \
-    --data-binary @"../$BUNDLE_NAME" \
-    -o /dev/null -w "%{http_code}")
+export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY}"
+export AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY}"
+export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 
-if [ "$UPLOAD_STATUS" -ge 200 ] && [ "$UPLOAD_STATUS" -lt 300 ]; then
-    log_success "Upload via S3 API: HTTP $UPLOAD_STATUS"
+# Criar bucket (idempotente)
+log_info "Verificando bucket '${S3_BUCKET}'..."
+
+aws --endpoint-url "${S3_ENDPOINT}" \
+    s3 mb "s3://${S3_BUCKET}" >/dev/null 2>&1 || true
+
+if aws --endpoint-url "${S3_ENDPOINT}" \
+      s3 ls | awk '{print $3}' | grep -qx "${S3_BUCKET}"; then
+    log_success "Bucket '${S3_BUCKET}' disponível."
 else
-    log_error "Falha no upload via S3 API (HTTP $UPLOAD_STATUS)"
-    log_info "Verifique:"
-    echo "   1. Se as credenciais S3 estão corretas (S3_ACCESS_KEY / S3_SECRET_KEY)"
-    echo "   2. Se o bucket '${S3_BUCKET}' existe"
-    echo "   3. Se o SeaweedFS S3 Gateway está rodando: sudo systemctl status seaweedfs-s3"
+    log_error "Bucket '${S3_BUCKET}' não encontrado."
     exit 1
 fi
 
-# --- 6c. Verificar se o bundle está acessível via Filer ---
-log_info "Verificando bundle via Filer (${FILER_URL})..."
-sleep 2  # Aguardar propagação
+# Upload
+log_info "Enviando ${BUNDLE_NAME}..."
 
-VERIFY_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+if aws --endpoint-url "${S3_ENDPOINT}" \
+        s3 cp "../${BUNDLE_NAME}" \
+        "s3://${S3_BUCKET}/${S3_KEY}" >/dev/null; then
+
+    log_success "Upload concluído."
+
+else
+
+    log_error "Falha no upload."
+    exit 1
+
+fi
+
+# Verificar no bucket
+log_info "Verificando objeto no bucket..."
+
+if aws --endpoint-url "${S3_ENDPOINT}" \
+      s3 ls "s3://${S3_BUCKET}/${S3_KEY}" >/dev/null 2>&1; then
+
+    log_success "Objeto encontrado no bucket."
+
+else
+
+    log_error "Objeto não encontrado após upload."
+    exit 1
+
+fi
+
+# Verificação via Filer
+log_info "Verificando propagação para o Filer..."
+sleep 2
+
+VERIFY_STATUS=$(curl -s \
+    -o /dev/null \
+    -w "%{http_code}" \
     "${FILER_URL}/buckets/${S3_BUCKET}/${S3_KEY}")
 
-if [ "$VERIFY_STATUS" == "200" ]; then
-    log_success "Bundle verificado no Filer (HTTP 200)"
+if [ "$VERIFY_STATUS" = "200" ]; then
+
+    log_success "Bundle disponível no Filer."
+
 else
-    log_warn "Bundle não encontrado via Filer (HTTP $VERIFY_STATUS)"
-    log_info "O upload S3 foi bem-sucedido, mas a verificação via Filer falhou."
-    log_info "Isso pode indicar um atraso na propagação. O OPA tentará baixar no próximo polling."
+
+    log_warn "Upload realizado, porém o Filer respondeu HTTP ${VERIFY_STATUS}."
+    log_warn "Pode haver atraso de sincronização."
+
 fi
 
 # ==============================================================================
