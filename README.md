@@ -71,7 +71,7 @@ seaweed-trino-lab-data-lakehouse/
 ```
 ---
 
-## Verificação dos serviços SeaweedFS
+## Verificação dos serviços SeaweedFS:
 
 | Serviço               | URL                                       | Descrição                                               |
 |-----------------------|-------------------------------------------|---------------------------------------------------------------------------|
