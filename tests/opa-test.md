@@ -36,7 +36,7 @@ Este role instala e configura o OPA em modo servidor para centralizar governanç
 curl http://127.0.0.1:8282/health
 
 # Avaliar status do OPA
-curl -s http://127.0.0.1:8282/v1/status | jq '.result.bundles.trino'
+curl -s http://127.0.0.1:8282/v1/status | jq '.result.bundles'
 
 # Listar políticas carregadas
 curl -s http://127.0.0.1:8282/v1/policies | jq '.result[].id'
