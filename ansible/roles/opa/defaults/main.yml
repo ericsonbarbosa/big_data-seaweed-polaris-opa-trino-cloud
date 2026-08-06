@@ -43,7 +43,7 @@ opa_enable_bundles: true
 opa_bundle_service_url: "http://127.0.0.1:8888"
 
 # Caminho do bundle no Filer
-opa_bundle_resource: "/buckets/opa-policies/bundle.tar.gz"
+opa_bundle_resource: "/buckets/opa-policies/portal-bundle.tar.gz"
 
 # Intervalo de polling (segundos) para verificar atualizações do bundle
 opa_bundle_polling_min: 10
